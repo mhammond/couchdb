@@ -21,16 +21,17 @@
 %  erlang={couch_native_process, start_link, []}
 %
 % Which will then allow following example map function to be used:
-% --------
-%  fun(Doc) ->
-%    % The result must be a list of {key, value} tuples.
-%    % 'value' itself may be a tuple of {key, value} tuples to emit an 'object'
+%
+%  fun({Doc}) ->
+%    % The result must be a list of [key, value] pairs.
+%    % See mochijson2.erl for proper ErlJSON formatting.
 %    % Below, we emit a single record - the _id as key, null as value
-%    [ {proplists:get_value(Doc, <<"_id">>), null} ]
-%    end.
-% -------
+%    [[proplists:get_value(Doc, <<"_id">>, null), null]]
+%  end.
+%
 % which should be roughly the same as the javascript:
 %    emit(doc._id, null);
+%
 % As can be seen, it is *not* geared towards being the friendliest or easiest
 % to use for authors of native view servers.  For such uses, this should be
 % used as a building-block upon which friendlier, or 'higher-level' view
