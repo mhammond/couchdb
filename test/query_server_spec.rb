@@ -14,9 +14,8 @@
 # spec test/query_server_spec.rb -f specdoc --color
 
 COUCH_ROOT = "#{File.dirname(__FILE__)}/.." unless defined?(COUCH_ROOT)
-LANGUAGE = "js"
+LANGUAGE = "erlang"
 
-require 'open3'
 require 'spec'
 require 'json'
 
@@ -25,25 +24,21 @@ class OSProcessRunner
     trace = false
     puts "launching #{run_command}" if trace
     if block_given?
-      Open3.popen3(run_command) do |jsin, jsout, jserr|
-        js = QueryServerRunner.new(jsin, jsout, jserr, trace)
-        yield js
+      IO.popen(run_command, "r+") do |io|
+        qs = QueryServerRunner.new(io, trace)
+        yield qs
       end
     else
-      jsin, jsout, jserr = Open3.popen3(run_command)
-      QueryServerRunner.new(jsin, jsout, jserr, trace)
+      io = IO.popen(run_command, "r+")
+      QueryServerRunner.new(io, trace)
     end
   end
-  def initialize jsin, jsout, jserr, trace = false
-    @qsin = jsin
-    @qsout = jsout
-    @qserr = jserr
+  def initialize io, trace = false
+    @qsio = io
     @trace = trace
   end
   def close
-    @qsin.close
-    @qsout.close
-    @qserr.close
+    @qsio.close
   end
   def reset!
     run(["reset"])
@@ -63,10 +58,10 @@ class OSProcessRunner
   def rrun json
     line = json.to_json
     puts "run: #{line}" if @trace
-    @qsin.puts line
+    @qsio.puts line
   end
   def rgets
-    resp = @qsout.gets
+    resp = @qsio.gets
     puts "got: #{resp}"  if @trace
     resp
   end
@@ -92,7 +87,10 @@ end
 
 class QueryServerRunner < OSProcessRunner
 
-  COMMANDS = {"js" => "#{COUCH_ROOT}/src/couchdb/couchjs #{COUCH_ROOT}/share/server/main.js" }
+  COMMANDS = {
+    "js" => "#{COUCH_ROOT}/src/couchdb/couchjs #{COUCH_ROOT}/share/server/main.js",
+    "erlang" => "#{COUCH_ROOT}/test/run_native_process.es"
+  }
 
   def self.run_command
     COMMANDS[LANGUAGE]
@@ -107,25 +105,51 @@ end
 
 functions = {
   "emit-twice" => {
-    "js" => %{function(doc){emit("foo",doc.a); emit("bar",doc.a)}}
+    "js" => %{function(doc){emit("foo",doc.a); emit("bar",doc.a)}},
+    "erlang" => <<-ERLANG
+      fun({Doc}) ->
+        A = proplists:get_value(<<"a">>, Doc, null),
+        [[<<"foo">>, A], [<<"bar">>, A]]
+      end.
+    ERLANG
   },
   "emit-once" => {
-    "js" => %{function(doc){emit("baz",doc.a)}}
+    "js" => %{function(doc){emit("baz",doc.a)}},
+    "erlang" => <<-ERLANG
+        fun({Doc}) ->
+            A = proplists:get_value(<<"a">>, Doc, null),
+            [[<<"baz">>, A]]
+        end.
+    ERLANG
   },
   "reduce-values-length" => {
-    "js" => %{function(keys, values, rereduce) { return values.length; }}
+    "js" => %{function(keys, values, rereduce) { return values.length; }},
+    "erlang" => %{fun(Keys, Values, ReReduce) -> length(Values) end.}
   },
   "reduce-values-sum" => {
-    "js" => %{function(keys, values, rereduce) { return sum(values); }}
+    "js" => %{function(keys, values, rereduce) { return sum(values); }},
+    "erlang" => %{fun(Keys, Values, ReReduce) -> lists:sum(Values) end.}
   },
   "validate-forbidden" => {
-    "js" => %{function(newDoc, oldDoc, userCtx) { if (newDoc.bad) throw({forbidden:"bad doc"}); "foo bar";}}
+    "js" => %[JS
+      function(newDoc, oldDoc, userCtx) {
+        if(newDoc.bad)
+          throw({forbidden:"bad doc"}); "foo bar";}
+      }
+    ],
+    "erlang" => <<-ERLANG
+      fun({NewDoc}, _OldDoc, _UserCtx) ->
+        case proplists:get_value(<<"bad">>, NewDoc) of
+            undefined -> 1;
+            _ -> {[{forbidden, <<"bad doc">>}]}
+        end
+      end.
+    ERLANG
   },
   "show-simple" => {
     "js" => <<-JS
         function(doc, req) {
-          log("ok");
-          return [doc.title, doc.body].join(' - ');
+
         }
     JS
   },

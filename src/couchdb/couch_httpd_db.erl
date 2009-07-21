@@ -66,6 +66,7 @@ get_changes_timeout(Req, Resp) ->
 
 handle_changes_req(#httpd{method='GET',path_parts=[DbName|_]}=Req, Db) ->
     StartSeq = list_to_integer(couch_httpd:qs_value(Req, "since", "0")),
+    
     {ok, Resp} = start_json_response(Req, 200),
     send_chunk(Resp, "{\"results\":[\n"),
     case couch_httpd:qs_value(Req, "continuous", "false") of
@@ -111,24 +112,22 @@ get_rest_db_updated() ->
     after 0 -> updated
     end.
 
-keep_sending_changes(#httpd{user_ctx=UserCtx,path_parts=[DbName|_]}=Req, Resp, Db, StartSeq, Prepend, Timeout, TimeoutFun) ->
-    {ok, {EndSeq, Prepend2}} = send_changes(Req, Resp, Db, StartSeq, Prepend),
+keep_sending_changes(#httpd{user_ctx=UserCtx,path_parts=[DbName|_]}=Req, Resp, Db, StartSeq, Prepend, Timeout, TimeoutFun, FilterFun) ->
+    {ok, {EndSeq, Prepend2}} = send_changes(Req, Resp, Db, StartSeq, Prepend, FilterFun),
     couch_db:close(Db),
     case wait_db_updated(Timeout, TimeoutFun) of
     updated ->
         {ok, Db2} = couch_db:open(DbName, [{user_ctx, UserCtx}]),
-        keep_sending_changes(Req, Resp, Db2, EndSeq, Prepend2, Timeout, TimeoutFun);
+        keep_sending_changes(Req, Resp, Db2, EndSeq, Prepend2, Timeout, TimeoutFun, FilterFun);
     stop ->
         send_chunk(Resp, io_lib:format("\n],\n\"last_seq\":~w}\n", [EndSeq])),
         end_json_response(Resp)
     end.
 
-send_changes(Req, Resp, Db, StartSeq, Prepend0) ->
+send_changes(Req, Resp, Db, StartSeq, Prepend0, FilterFun) ->
     Style = list_to_existing_atom(
             couch_httpd:qs_value(Req, "style", "main_only")),
-    {FilterFun, EndFilterFun} = make_filter_funs(Req, Db),
-    try
-        couch_db:changes_since(Db, Style, StartSeq,
+    couch_db:changes_since(Db, Style, StartSeq,
         fun([#doc_info{id=Id, high_seq=Seq}|_]=DocInfos, {_, Prepend}) ->
             Results0 = [FilterFun(DocInfo) || DocInfo <- DocInfos],
             Results = [Result || Result <- Results0, Result /= null],
@@ -141,20 +140,16 @@ send_changes(Req, Resp, Db, StartSeq, Prepend0) ->
                                               {changes,Results}]})]),
                 {ok, {Seq, <<",\n">>}}
             end
-        end, {StartSeq, Prepend0})
-    after
-        EndFilterFun()
-    end.
+        end, {StartSeq, Prepend0}).
 
-make_filter_funs(Req, Db) ->
-    Filter = couch_httpd:qs_value(Req, "filter", ""),
+make_filter_funs(_Req, _Db, nil) -> 
+    {ok, fun(#doc_info{revs=[#rev_info{rev=Rev}|_]}) ->
+        {[{rev, couch_doc:rev_to_str(Rev)}]}
+    end,
+    fun() -> ok end};
+make_filter_funs(Req, Db, Filter) -> 
     case [list_to_binary(couch_httpd:unquote(Part))
             || Part <- string:tokens(Filter, "/")] of
-    [] ->
-    {fun(#doc_info{revs=[#rev_info{rev=Rev}|_]}) ->
-            {[{rev, couch_doc:rev_to_str(Rev)}]}
-        end,
-        fun() -> ok end};
     [DName, FName] ->
         DesignId = <<"_design/", DName/binary>>,
         #doc{body={Props}} = couch_httpd_db:couch_doc_open(Db, DesignId, nil, []),
@@ -174,7 +169,7 @@ make_filter_funs(Req, Db) ->
         EndFilterFun = fun() ->
             couch_query_servers:end_filter(Pid)
         end,
-        {FilterFun, EndFilterFun};
+        {ok, FilterFun, EndFilterFun};
     _Else ->
         throw({bad_request, 
             "filter parameter must be of the form `designname/filtername`"})
