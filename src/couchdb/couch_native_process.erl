@@ -36,103 +36,53 @@
 % used as a building-block upon which friendlier, or 'higher-level' view
 % servers can be built upon, and the sources of such 'helper' functions
 % as used above, if
-
 -module(couch_native_process).
--behaviour(gen_server).
 
 -export([start_link/0]).
 -export([set_timeout/2, prompt/2, stop/1]).
 
-%% gen_server callbacks
--export([init/1, terminate/2, code_change/3]).
--export([handle_call/3, handle_cast/2, handle_info/2]).
-
--include("couch_db.hrl").
-
--record(evstate, {fun_was="everywhere", funs=[], query_config=[]}).
+-define(STATE, native_proc_state).
+-record(evstate, {funs=[], query_config=[]}).
 
 start_link() ->
-    gen_server:start_link(?MODULE, [], []).
+    put(?STATE, #evstate{}),
+    {ok, self()}.
 
-stop(Pid) ->
-    gen_server:cast(Pid, stop).
-
+stop(_Pid) ->
+    ok.
 
 set_timeout(_Pid, _TimeOut) ->
     ok.
 
-prompt(Pid, Data) ->
-    case gen_server:call(Pid, {prompt, Data}, infinity) of
-        {ok, Result} ->
-            Result;
-        Error ->
-            %?LOG_ERROR("Native Server Error :: ~p",[Error]),
-            throw(Error)
-    end.
+prompt(Pid, Data) when is_pid(Pid) ->
+    State = get(?STATE),
+    {NewState, Resp} = run(State, Data),
+    put(?STATE, NewState),
+    Resp.
 
-init([]) ->
-    {ok, #evstate{fun_was="init"}}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-handle_call({prompt, [<<"reset">>]}, _From, _State) ->
-    {reply, {ok, true}, #evstate{fun_was="reset", funs=[]}};
-handle_call({prompt, [<<"reset">>, QueryConfig]}, _From, _State) ->
-    {reply, {ok, true},
-        #evstate{
-            fun_was="reset",
-            funs=[],
-            query_config=QueryConfig
-        }
-    };
-handle_call({prompt, [<<"add_fun">> , BinFunc]}, _From, State) ->
-    BinFunctions =
-    case is_list(BinFunc) of
-        true -> BinFunc;
-        _ -> [BinFunc]
-    end,
-
-    % thanks to erlview, via:
-    % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html
-    % for the scan/parse/eval
-    NewFuns = lists:map(fun makefun/1, BinFunctions),
-    NewState = #evstate{
-        fun_was="add_fun",
-        funs=State#evstate.funs ++ NewFuns,
-        query_config=State#evstate.query_config
-    },
-    {reply, {ok, true}, NewState};
-handle_call({prompt, [<<"map_doc">> , Doc]} , _From , State) ->
-    L = lists:map(fun(Fa) ->
-        Fa(Doc)
-    end, State#evstate.funs),
-    {reply, {ok, L}, State#evstate{fun_was="map_doc"}};
-handle_call({prompt, [<<"reduce">>, Funs, KVs]}, _From, State) ->
+run(_, [<<"reset">>]) ->
+    {#evstate{}, true};
+run(_, [<<"reset">>, QueryConfig]) ->
+    {#evstate{query_config=QueryConfig}, true};
+run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
+    Fun = makefun(BinFunc),
+    {State#evstate{funs=Funs ++ [Fun]}, true};
+run(State, [<<"map_doc">> , Doc]) ->
+    Resp = lists:map(fun(Fa) -> catch Fa(Doc) end, State#evstate.funs),
+    {State, Resp};
+run(State, [<<"reduce">>, Funs, KVs]) ->
     {Keys, Vals} =
     lists:foldl(fun([K, V], {KAcc, VAcc}) ->
         {[K | KAcc], [V | VAcc]}
     end, {[], []}, KVs),
     Keys2 = lists:reverse(Keys),
     Vals2 = lists:reverse(Vals),
-    Resp = reduce(Funs, Keys2, Vals2, false),
-    {reply, {ok, Resp}, State#evstate{fun_was="reduce"}};
-handle_call({prompt, [<<"rereduce">>, Funs, Vals]}, _From, State) ->
-    Resp = reduce(Funs, null, Vals, true),
-    {reply, {ok, Resp}, State#evstate{fun_was="rereduce"}};
-handle_call({prompt, [<<"validate">>, BFun, NDoc, ODoc, Ctx]}, _From, State) ->
+    {State, catch reduce(Funs, Keys2, Vals2, false)};
+run(State, [<<"rereduce">>, Funs, Vals]) ->
+    {State, catch reduce(Funs, null, Vals, true)};
+run(State, [<<"validate">>, BFun, NDoc, ODoc, Ctx]) ->
     Fun = makefun(BFun),
-    Resp = (catch Fun(NDoc, ODoc, Ctx)),
-    {reply, {ok, Resp}, State#evstate{fun_was="validate"}}.
-
-handle_cast(_Msg, State) ->
-    {noreply, State}.
-
-handle_info(_Info, State) ->
-    {noreply, State}.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    {State, catch Fun(NDoc, ODoc, Ctx)}.
 
 % thanks to erlview, via:
 % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html

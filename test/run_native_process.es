@@ -12,7 +12,10 @@ send(Data) when is_list(Data) ->
     io:format(Data ++ "\n", []).
 
 write(Data) ->
-    send(mochijson2:encode(Data)).
+    case (catch mochijson2:encode(Data)) of
+        {json_encode, Error} -> write({[{<<"error">>, Error}]});
+        Json -> send(Json)
+    end.
 
 loop(Pid) ->
     case read() of
