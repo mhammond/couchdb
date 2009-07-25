@@ -46,7 +46,6 @@
 -record(evstate, {funs=[], query_config=[]}).
 
 start_link() ->
-    put(?STATE, #evstate{}),
     {ok, self()}.
 
 stop(_Pid) ->
@@ -56,7 +55,13 @@ set_timeout(_Pid, _TimeOut) ->
     ok.
 
 prompt(Pid, Data) when is_pid(Pid) ->
-    State = get(?STATE),
+    case get(?STATE) of
+    undefined ->
+        State = #evstate{},
+        put(?STATE, State);
+    State ->
+        State
+    end,
     {NewState, Resp} = run(State, Data),
     put(?STATE, NewState),
     Resp.
