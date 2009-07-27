@@ -14,7 +14,7 @@
 # spec test/query_server_spec.rb -f specdoc --color
 
 COUCH_ROOT = "#{File.dirname(__FILE__)}/.." unless defined?(COUCH_ROOT)
-LANGUAGE = "js"
+LANGUAGE = "erlang"
 
 require 'spec'
 require 'json'
@@ -109,7 +109,8 @@ functions = {
     "erlang" => <<-ERLANG
       fun({Doc}) ->
         A = proplists:get_value(<<"a">>, Doc, null),
-        [[<<"foo">>, A], [<<"bar">>, A]]
+        Emit(<<"foo">>, A),
+        Emit(<<"bar">>, A)
       end.
     ERLANG
   },
@@ -118,7 +119,7 @@ functions = {
     "erlang" => <<-ERLANG
         fun({Doc}) ->
             A = proplists:get_value(<<"a">>, Doc, null),
-            [[<<"baz">>, A]]
+            Emit(<<"baz">>, A)
         end.
     ERLANG
   },
@@ -154,13 +155,19 @@ functions = {
         }
     JS
     "erlang" => <<-ERLANG
-	fun({Doc}, Req) ->
-		StrItems = [proplists:get_value(<<"title">>, Doc), <<" - ">>, proplists:get_value(<<"body">>, Doc)],
-		StrVal = lists:concat(lists:map( fun(V) -> binary_to_list(V) end, StrItems)),
-		[<<"resp">>, {[{<<"body">>, list_to_binary(StrVal)}]}]
-	end.
-  ERLANG
-},
+	    fun({Doc}, Req) ->
+		    StrItems = [
+                proplists:get_value(<<"title">>, Doc),
+                <<" - ">>,
+                proplists:get_value(<<"body">>, Doc)
+            ],
+	    	StrVal = lists:concat(
+                lists:map(fun(V) -> binary_to_list(V) end, StrItems)
+            ),
+	 	    [<<"resp">>, {[{<<"body">>, list_to_binary(StrVal)}]}]
+	    end.
+    ERLANG
+  },
   "show-headers" => {
     "js" => <<-JS,
         function(doc, req) {
@@ -171,14 +178,22 @@ functions = {
      JS
     "erlang" => <<-ERLANG
 	fun({Doc}, Req) ->
-		StrItems = [proplists:get_value(<<"title">>, Doc), <<" - ">>, proplists:get_value(<<"body">>, Doc)],
-		StrVal = lists:concat(lists:map( fun(V) -> binary_to_list(V) end, StrItems)),
-		[<<"resp">>, 
-		{[
-			{<<"body">>, list_to_binary(StrVal)},
-			{<<"code">>, 200},
-			{<<"headers">>, {[{<<"X-Plankton">>, <<"Rusty">>}]}}
-		]}]
+		StrItems = [
+            proplists:get_value(<<"title">>, Doc),
+            <<" - ">>,
+            proplists:get_value(<<"body">>, Doc)
+        ],
+		StrVal = lists:concat(
+            lists:map( fun(V) -> binary_to_list(V) end, StrItems)
+        ),
+		[
+            <<"resp">>, 
+		    {[
+			    {<<"body">>, list_to_binary(StrVal)},
+			    {<<"code">>, 200},
+			    {<<"headers">>, {[{<<"X-Plankton">>, <<"Rusty">>}]}}
+		    ]}
+        ]
 	end.
     ERLANG
   },
@@ -193,10 +208,11 @@ functions = {
     JS
     "erlang" => <<-ERLANG
 	fun(Head, Req) ->
-		[<<"start">>, 
-		 [<<"first chunk">>, <<"second \\"chunk\\"">>],
-		 {[{<<"headers">>, {[{<<"Content-Type">>, <<"text/plain">>}]}}]}
-		 %[<<"headers">> , <<"Content-Type">>, <<"text/plain">>]
+		[
+            <<"start">>, 
+		    [<<"first chunk">>, <<"second \\"chunk\\"">>],
+		    {[{<<"headers">>, {[{<<"Content-Type">>, <<"text/plain">>}]}}]}
+		    [<<"headers">> , <<"Content-Type">>, <<"text/plain">>]
 		]
 	end.
     ERLANG

@@ -45,6 +45,8 @@
 -define(STATE, native_proc_state).
 -record(evstate, {funs=[], query_config=[]}).
 
+-include("couch_db.hrl").
+
 start_link() ->
     {ok, self()}.
 
@@ -77,10 +79,10 @@ run(_, [<<"reset">>]) ->
 run(_, [<<"reset">>, QueryConfig]) ->
     {#evstate{query_config=QueryConfig}, true};
 run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
-    Fun = makefun(BinFunc),
+    Fun = map_fun(BinFunc),
     {State#evstate{funs=Funs ++ [Fun]}, true};
 run(State, [<<"map_doc">> , Doc]) ->
-    Resp = lists:map(fun(Fa) -> catch Fa(Doc) end, State#evstate.funs),
+    Resp = lists:map(fun(Fun) -> Fun(Doc) end, State#evstate.funs),
     {State, Resp};
 run(State, [<<"reduce">>, Funs, KVs]) ->
     {Keys, Vals} =
@@ -101,13 +103,37 @@ run(State, [<<"show">>, BFun, Doc, Req]) ->
 run(State, [<<"list">>, Head, Req]) ->
     {State, catch (hd(State#evstate.funs))(Head, Req)}.
 
+make_emit(Sig) ->
+    erlang:put(Sig, []),
+    fun(Id, Value) ->
+        io:format(standard_error, "EMITTING: ~p => ~p~n", [Id, Value]),
+        Curr = erlang:get(Sig),
+        erlang:put(Sig, [[Id, Value] | Curr])
+    end.
+
+map_fun(Source) ->
+    Sig = erlang:md5(Source),
+    MapFun = makefun(Source, [{'Emit', make_emit(Sig)}]),
+    fun(Doc) ->
+        MapFun(Doc),
+        lists:reverse(erlang:get(Sig))
+    end.
+
 % thanks to erlview, via:
 % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html
 makefun(Source) ->
-    FunStr = binary_to_list(Source), 
+    makefun(Source, []).
+
+makefun(Source, BindFuns) ->
+    FunStr = binary_to_list(Source),
     {ok, Tokens, _} = erl_scan:string(FunStr),
     {ok, [Form]} = erl_parse:parse_exprs(Tokens),
-    Bindings = erl_eval:new_bindings(),
+    Log = fun(Msg) ->
+        ?LOG_INFO("Native process log: ~p~n", [Msg])
+    end,
+    Bindings = lists:foldl(fun({Name, Fun}, Acc) ->
+        erl_eval:add_binding(Name, Fun, Acc)
+    end, erl_eval:new_bindings(), BindFuns ++ [{'Log', Log}]),
     {value, Fun, _} = erl_eval:expr(Form, Bindings),
     Fun.
 
