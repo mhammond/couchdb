@@ -153,18 +153,37 @@ functions = {
             return [doc.title, doc.body].join(' - ');
         }
     JS
-  },
+    "erlang" => <<-ERLANG
+	fun({Doc}, Req) ->
+		StrItems = [proplists:get_value(<<"title">>, Doc), <<" - ">>, proplists:get_value(<<"body">>, Doc)],
+		StrVal = lists:concat(lists:map( fun(V) -> binary_to_list(V) end, StrItems)),
+		[<<"resp">>, {[{<<"body">>, list_to_binary(StrVal)}]}]
+	end.
+  ERLANG
+},
   "show-headers" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(doc, req) {
           var resp = {"code":200, "headers":{"X-Plankton":"Rusty"}};
           resp.body = [doc.title, doc.body].join(' - ');
           return resp;
         }
      JS
+    "erlang" => <<-ERLANG
+	fun({Doc}, Req) ->
+		StrItems = [proplists:get_value(<<"title">>, Doc), <<" - ">>, proplists:get_value(<<"body">>, Doc)],
+		StrVal = lists:concat(lists:map( fun(V) -> binary_to_list(V) end, StrItems)),
+		[<<"resp">>, 
+		{[
+			{<<"body">>, list_to_binary(StrVal)},
+			{<<"code">>, 200},
+			{<<"headers">>, {[{<<"X-Plankton">>, <<"Rusty">>}]}}
+		]}]
+	end.
+    ERLANG
   },
   "show-sends" => {
-    "js" =>  <<-JS
+    "js" =>  <<-JS,
         function(head, req) {
           start({headers:{"Content-Type" : "text/plain"}});
           send("first chunk");
@@ -172,6 +191,15 @@ functions = {
           return "tail";
         };
     JS
+    "erlang" => <<-ERLANG
+	fun(Head, Req) ->
+		[<<"start">>, 
+		 [<<"first chunk">>, <<"second \\"chunk\\"">>],
+		 {[{<<"headers">>, {[{<<"Content-Type">>, <<"text/plain">>}]}}]}
+		 %[<<"headers">> , <<"Content-Type">>, <<"text/plain">>]
+		]
+	end.
+    ERLANG
   },
   "show-while-get-rows" => {
     "js" =>  <<-JS
@@ -338,7 +366,7 @@ describe "query server normal case" do
     end
     it "should show" do
       @qs.rrun(["show", @fun,
-        {:title => "Best ever", :body => "Doc body"}])
+        {:title => "Best ever", :body => "Doc body"}, {}])
       @qs.jsgets.should == ["resp", {"body" => "Best ever - Doc body"}]
     end
   end
@@ -350,7 +378,7 @@ describe "query server normal case" do
     end
     it "should show headers" do
       @qs.rrun(["show", @fun,
-        {:title => "Best ever", :body => "Doc body"}])
+        {:title => "Best ever", :body => "Doc body"}, {}])
       @qs.jsgets.should == ["resp", {"code"=>200,"headers" => {"X-Plankton"=>"Rusty"}, "body" => "Best ever - Doc body"}]
     end
   end
