@@ -64,7 +64,13 @@ prompt(Pid, Data) when is_pid(Pid) ->
     end,
     {NewState, Resp} = run(State, Data),
     put(?STATE, NewState),
-    Resp.
+    case Resp of
+    {'EXIT', Reason} ->
+        % Try and turn the error into a string.
+        Msg = iolist_to_binary(io_lib:format("couch native server error: ~p", [Reason])),
+        {[{<<"error">>, Msg}]};
+    _ -> Resp
+    end.
 
 run(_, [<<"reset">>]) ->
     {#evstate{}, true};
@@ -88,7 +94,12 @@ run(State, [<<"rereduce">>, Funs, Vals]) ->
     {State, catch reduce(Funs, null, Vals, true)};
 run(State, [<<"validate">>, BFun, NDoc, ODoc, Ctx]) ->
     Fun = makefun(BFun),
-    {State, catch Fun(NDoc, ODoc, Ctx)}.
+    {State, catch Fun(NDoc, ODoc, Ctx)};
+run(State, [<<"show">>, BFun, Doc, Req]) ->
+    Fun = makefun(BFun),
+    {State, catch Fun(Doc, Req)};
+run(State, [<<"list">>, Head, Req]) ->
+    {State, catch (hd(State#evstate.funs))(Head, Req)}.
 
 % thanks to erlview, via:
 % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html
