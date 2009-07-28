@@ -155,17 +155,12 @@ functions = {
         }
     JS
     "erlang" => <<-ERLANG
-	    fun({Doc}, Req) ->
-		    StrItems = [
-                proplists:get_value(<<"title">>, Doc),
-                <<" - ">>,
-                proplists:get_value(<<"body">>, Doc)
-            ],
-	    	StrVal = lists:concat(
-                lists:map(fun(V) -> binary_to_list(V) end, StrItems)
-            ),
-	 	    [<<"resp">>, {[{<<"body">>, list_to_binary(StrVal)}]}]
-	    end.
+      fun({Doc}, Req) ->
+            Title = proplists:get_value(<<"title">>, Doc),
+            Body = proplists:get_value(<<"body">>, Doc),
+            Resp = <<Title/binary, " - ", Body/binary>>,
+        {[{<<"body">>, Resp}]}
+      end.
     ERLANG
   },
   "show-headers" => {
@@ -177,24 +172,16 @@ functions = {
         }
      JS
     "erlang" => <<-ERLANG
-	fun({Doc}, Req) ->
-		StrItems = [
-            proplists:get_value(<<"title">>, Doc),
-            <<" - ">>,
-            proplists:get_value(<<"body">>, Doc)
-        ],
-		StrVal = lists:concat(
-            lists:map( fun(V) -> binary_to_list(V) end, StrItems)
-        ),
-		[
-            <<"resp">>, 
-		    {[
-			    {<<"body">>, list_to_binary(StrVal)},
-			    {<<"code">>, 200},
-			    {<<"headers">>, {[{<<"X-Plankton">>, <<"Rusty">>}]}}
-		    ]}
-        ]
-	end.
+  fun({Doc}, Req) ->
+        Title = proplists:get_value(<<"title">>, Doc),
+        Body = proplists:get_value(<<"body">>, Doc),
+        Resp = <<Title/binary, " - ", Body/binary>>,
+        {[
+        {<<"code">>, 200},
+        {<<"headers">>, {[{<<"X-Plankton">>, <<"Rusty">>}]}},
+        {<<"body">>, Resp}
+      ]}
+  end.
     ERLANG
   },
   "show-sends" => {
@@ -207,18 +194,19 @@ functions = {
         };
     JS
     "erlang" => <<-ERLANG
-	fun(Head, Req) ->
-		[
-            <<"start">>, 
-		    [<<"first chunk">>, <<"second \\"chunk\\"">>],
-		    {[{<<"headers">>, {[{<<"Content-Type">>, <<"text/plain">>}]}}]}
-		    [<<"headers">> , <<"Content-Type">>, <<"text/plain">>]
-		]
-	end.
+      fun(Head, Req) ->
+        Resp = {[
+          {<<"headers">>, {[{<<"Content-Type">>, <<"text/plain">>}]}}
+        ]},
+        Start(Resp),
+        Send(<<"first chunk">>),
+        Send(<<"second \\\"chunk\\\"">>),
+        <<"tail">>
+      end.
     ERLANG
   },
   "show-while-get-rows" => {
-    "js" =>  <<-JS
+    "js" =>  <<-JS,
         function(head, req) {
           send("first chunk");
           send(req.q);
@@ -230,6 +218,21 @@ functions = {
           return "tail";
         };
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, {Req}) ->
+            Send(<<"first chunk">>),
+            Send(proplists:get_value(<<"q">>, Req)),
+            Fun = fun
+                (nil, _) ->
+                    ok;
+                ({Row}, F1) ->
+                    Send(proplists:get_value(<<"key">>, Row)),
+                    F1(GetRow(), F1)
+            end,
+            Fun(GetRow(), Fun),
+            <<"tail">>
+        end.
+    ERLANG
   },
   "show-while-get-rows-multi-send" => {
     "js" => <<-JS

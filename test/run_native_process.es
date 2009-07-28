@@ -17,6 +17,11 @@ write(Data) ->
         Json -> send(Json)
     end.
 
+%log(Mesg) ->
+%    log(Mesg, []).
+%log(Mesg, Params) ->
+%    io:format(standard_error, Mesg, Params).
+
 loop(Pid) ->
     case read() of
         stop -> ok;

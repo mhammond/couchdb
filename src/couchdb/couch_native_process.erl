@@ -14,7 +14,8 @@
 %
 % This file drew much inspiration from erlview, which was written by and
 % copyright Michael McDaniel [http://autosys.us], and is also under APL 2.0
-
+%
+%
 % This module provides the smallest possible native view-server.
 % With this module in-place, you can add the following to your couch INI files:
 %  [native_query_servers]
@@ -23,10 +24,9 @@
 % Which will then allow following example map function to be used:
 %
 %  fun({Doc}) ->
-%    % The result must be a list of [key, value] pairs.
-%    % See mochijson2.erl for proper ErlJSON formatting.
 %    % Below, we emit a single record - the _id as key, null as value
-%    [[proplists:get_value(Doc, <<"_id">>, null), null]]
+%    DocId = proplists:get_value(Doc, <<"_id">>, null),
+%    Emit(DocId, null)
 %  end.
 %
 % which should be roughly the same as the javascript:
@@ -43,7 +43,7 @@
 -export([set_timeout/2, prompt/2, stop/1]).
 
 -define(STATE, native_proc_state).
--record(evstate, {funs=[], query_config=[]}).
+-record(evstate, {funs=[], query_config=[], list_pid=nil}).
 
 -include("couch_db.hrl").
 
@@ -67,11 +67,11 @@ prompt(Pid, Data) when is_pid(Pid) ->
     {NewState, Resp} = run(State, Data),
     put(?STATE, NewState),
     case Resp of
-    {'EXIT', Reason} ->
-        % Try and turn the error into a string.
-        Msg = iolist_to_binary(io_lib:format("couch native server error: ~p", [Reason])),
-        {[{<<"error">>, Msg}]};
-    _ -> Resp
+        {error, Reason} ->
+            Msg = io_lib:format("couch native server error: ~p", [Reason]),
+            {[{<<"error">>, list_to_binary(Msg)}]};
+        _ ->
+            Resp
     end.
 
 run(_, [<<"reset">>]) ->
@@ -79,10 +79,13 @@ run(_, [<<"reset">>]) ->
 run(_, [<<"reset">>, QueryConfig]) ->
     {#evstate{query_config=QueryConfig}, true};
 run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
-    Fun = map_fun(BinFunc),
-    {State#evstate{funs=Funs ++ [Fun]}, true};
+    FunInfo = makefun(BinFunc),
+    {State#evstate{funs=Funs ++ [FunInfo]}, true};
 run(State, [<<"map_doc">> , Doc]) ->
-    Resp = lists:map(fun(Fun) -> Fun(Doc) end, State#evstate.funs),
+    Resp = lists:map(fun({Sig, Fun}) ->
+        Fun(Doc),
+        lists:reverse(erlang:get(Sig))
+    end, State#evstate.funs),
     {State, Resp};
 run(State, [<<"reduce">>, Funs, KVs]) ->
     {Keys, Vals} =
@@ -95,53 +98,221 @@ run(State, [<<"reduce">>, Funs, KVs]) ->
 run(State, [<<"rereduce">>, Funs, Vals]) ->
     {State, catch reduce(Funs, null, Vals, true)};
 run(State, [<<"validate">>, BFun, NDoc, ODoc, Ctx]) ->
-    Fun = makefun(BFun),
+    {_Sig, Fun} = makefun(BFun),
     {State, catch Fun(NDoc, ODoc, Ctx)};
 run(State, [<<"show">>, BFun, Doc, Req]) ->
-    Fun = makefun(BFun),
-    {State, catch Fun(Doc, Req)};
+    {_Sig, Fun} = makefun(BFun),
+    Resp = case (catch Fun(Doc, Req)) of
+        FunResp when is_list(FunResp) ->
+            FunResp;
+        FunResp when is_tuple(FunResp), size(FunResp) == 1 ->
+            [<<"resp">>, FunResp];
+        FunResp ->
+            FunResp
+    end,
+    {State, Resp};
 run(State, [<<"list">>, Head, Req]) ->
-    {State, catch (hd(State#evstate.funs))(Head, Req)}.
+    write("Getting fun~n"),
+    {Sig, Fun} = hd(State#evstate.funs),
+    write("Spawning function.~n"),
+    Self = self(),
+    SpawnFun = fun() ->
+        write("Spawned!~n"),
+        LastChunk = (catch Fun(Head, Req)),
+        io:format(standard_error, "LAST: ~p~n", [LastChunk]),
+        write("Finished!~n"),
+        case erlang:get(list_started) of
+            undefined ->
+                Headers =
+                case erlang:get(list_headers) of
+                    undefined -> [];
+                    CurrHdrs -> CurrHdrs
+                end,
+                Chunks = 
+                case erlang:get(Sig) of
+                    undefined -> [];
+                    CurrChunks -> CurrChunks
+                end,
+                Self ! {self(), start, lists:reverse(Chunks), Headers},
+                erlang:put(Sig, []),
+                receive
+                    {Self, list_row, _Row} -> ignore;
+                    {Self, list_end} -> ignore
+                after 5000 ->
+                    throw({timeout, list_cleanup_pid})
+                end;
+            _ ->
+                ok
+        end,
+        LastChunks =
+        case erlang:get(Sig) of
+            undefined -> [LastChunk];
+            OtherChunks -> [LastChunk | OtherChunks]
+        end,
+        Self ! {self(), list_end, lists:reverse(LastChunks)}
+    end,
+    write("Created, putting~n"),
+    erlang:put(do_trap, process_flag(trap_exit, true)),
+    write("And spawn link~n"),
+    Pid = spawn_link(SpawnFun),
+    write("Waiting for response.~n"),
+    Resp =
+    receive
+        {Pid, start, Chunks, JsonResp} ->
+            write("Got response~n"),
+            [<<"start">>, Chunks, JsonResp]
+    after 5000 ->
+        write("Timed out~n"),
+        throw({timeout, list_start})
+    end,
+    {State#evstate{list_pid=Pid}, Resp};
+run(#evstate{list_pid=Pid}=State, [<<"list_row">>, Row]) when is_pid(Pid) ->
+    Pid ! {self(), list_row, Row},
+    receive
+        {Pid, chunks, Data} ->
+            {State, [<<"chunks">>, Data]};
+        {Pid, list_end, Data} ->
+            receive
+                {'EXIT', Pid, normal} -> ok
+            after 5000 ->
+                throw({timeout, list_cleanup})
+            end,
+            process_flag(trap_exit, erlang:get(do_trap)),
+            {State#evstate{list_pid=nil}, [<<"end">>, Data]}
+    after 5000 ->
+        throw({timeout, list_row})
+    end;
+run(#evstate{list_pid=Pid}=State, [<<"list_end">>]) when is_pid(Pid) ->
+    Pid ! {self(), list_end},
+    Resp =
+    receive
+        {Pid, list_end, Data} ->
+            receive
+                {'EXIT', Pid, normal} -> ok
+            after 5000 ->
+                throw({timeout, list_cleanup})
+            end,
+            [<<"end">>, Data]            
+    after 5000 ->
+        throw({timeout, list_end})
+    end,
+    process_flag(trap_exit, erlang:get(do_trap)),
+    {State#evstate{list_pid=nil}, Resp};
+run(_, Unknown) ->
+    ?LOG_ERROR("Native Process: Unknown command: ~p~n", [Unknown]),
+    throw({error, unknown_command}).
 
-make_emit(Sig) ->
+bindings(Sig) ->
+    Self = self(),
+
+    Log = fun(Msg) ->
+        ?LOG_INFO(Msg, [])
+    end,
+
     erlang:put(Sig, []),
-    fun(Id, Value) ->
-        io:format(standard_error, "EMITTING: ~p => ~p~n", [Id, Value]),
+    Emit = fun(Id, Value) ->
         Curr = erlang:get(Sig),
         erlang:put(Sig, [[Id, Value] | Curr])
-    end.
+    end,
 
-map_fun(Source) ->
-    Sig = erlang:md5(Source),
-    MapFun = makefun(Source, [{'Emit', make_emit(Sig)}]),
-    fun(Doc) ->
-        MapFun(Doc),
-        lists:reverse(erlang:get(Sig))
-    end.
+    Start = fun(Headers) ->
+        write("START CALLED~n"),
+        erlang:put(list_headers, Headers)
+    end,
+
+    Send = fun(Chunk) ->
+        write("SEND CALLED~n"),
+        Curr =
+        case erlang:get(Sig) of
+            undefined -> [];
+            Else -> Else
+        end,
+        erlang:put(Sig, [Chunk | Curr]),
+        write("DONE SENDING~n")
+    end,
+
+    GetRow = fun() ->
+        write("GET ROW CALLED~n"),
+        case erlang:get(list_started) of
+            undefined ->
+                write("INIT LIST~n"),
+                Headers =
+                case erlang:get(list_headers) of
+                    undefined -> {[{<<"headers">>, {[]}}]};
+                    CurrHdrs -> CurrHdrs
+                end,
+                Chunks = 
+                case erlang:get(Sig) of
+                    undefined -> [];
+                    CurrChunks -> CurrChunks
+                end,
+                Self ! {self(), start, lists:reverse(Chunks), Headers},
+                erlang:put(list_started, true);
+            _ ->
+                write("LIST STARTED SENDING~n"),
+                Chunks =
+                case erlang:get(Sig) of
+                    undefined -> [];
+                    CurrChunks -> CurrChunks
+                end,
+                Self ! {self(), chunks, lists:reverse(Chunks)}
+        end,
+        erlang:put(Sig, []),
+        receive
+            {Self, list_row, Row} ->
+                Row;
+            {Self, list_end} ->
+                nil
+        after 5000 ->
+            throw({timeout, list_pid_getrow})
+        end
+    end,
+    
+    [
+        {'Log', Log},
+        {'Emit', Emit},
+        {'Start', Start},
+        {'Send', Send},
+        {'GetRow', GetRow}
+    ].
 
 % thanks to erlview, via:
 % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html
 makefun(Source) ->
-    makefun(Source, []).
+    Sig = erlang:md5(Source),
+    BindFuns = bindings(Sig),
+    {Sig, makefun(Source, BindFuns)}.
 
 makefun(Source, BindFuns) ->
     FunStr = binary_to_list(Source),
     {ok, Tokens, _} = erl_scan:string(FunStr),
-    {ok, [Form]} = erl_parse:parse_exprs(Tokens),
-    Log = fun(Msg) ->
-        ?LOG_INFO("Native process log: ~p~n", [Msg])
+    Form = case (catch erl_parse:parse_exprs(Tokens)) of
+        {ok, [ParsedForm]} ->
+            ParsedForm;
+        {error, {LineNum, _Mod, [Mesg, Params]}}=Error ->
+            io:format(standard_error, "Syntax error on line: ~p~n", [LineNum]),
+            io:format(standard_error, "~s~p~n", [Mesg, Params]),
+            throw(Error)
     end,
     Bindings = lists:foldl(fun({Name, Fun}, Acc) ->
         erl_eval:add_binding(Name, Fun, Acc)
-    end, erl_eval:new_bindings(), BindFuns ++ [{'Log', Log}]),
+    end, erl_eval:new_bindings(), BindFuns),
     {value, Fun, _} = erl_eval:expr(Form, Bindings),
     Fun.
 
 reduce(BinFuns, Keys, Vals, ReReduce) ->
     Funs = case is_list(BinFuns) of
-        true -> lists:map(fun makefun/1, BinFuns);
-        _ -> [makefun(BinFuns)]
+        true ->
+            lists:map(fun makefun/1, BinFuns);
+        _ ->
+            [makefun(BinFuns)]
     end,
-    Reds = lists:map(fun(F) -> F(Keys, Vals, ReReduce) end, Funs),
+    Reds = lists:map(fun({_Sig, Fun}) ->
+        Fun(Keys, Vals, ReReduce)
+    end, Funs),
     [true, Reds].
 
+write(Msg) ->
+    write(Msg, []).
+write(Msg, Args) ->
+    io:format(standard_error, Msg, Args).
