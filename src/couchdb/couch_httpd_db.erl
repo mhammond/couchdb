@@ -66,32 +66,38 @@ get_changes_timeout(Req, Resp) ->
 
 handle_changes_req(#httpd{method='GET',path_parts=[DbName|_]}=Req, Db) ->
     StartSeq = list_to_integer(couch_httpd:qs_value(Req, "since", "0")),
-    
-    {ok, Resp} = start_json_response(Req, 200),
-    send_chunk(Resp, "{\"results\":[\n"),
-    case couch_httpd:qs_value(Req, "continuous", "false") of
-    "true" ->
-        Self = self(),
-        {ok, Notify} = couch_db_update_notifier:start_link(
-            fun({_, DbName0}) when DbName0 == DbName ->
-                Self ! db_updated;
-            (_) ->
-                ok
-            end),
-        {Timeout, TimeoutFun} = get_changes_timeout(Req, Resp),
-        couch_stats_collector:track_process_count(Self,
-                            {httpd, clients_requesting_changes}),
-        try
-            keep_sending_changes(Req, Resp, Db, StartSeq, <<"">>, Timeout, TimeoutFun)
-        after
-            couch_db_update_notifier:stop(Notify),
-            get_rest_db_updated() % clean out any remaining update messages
-        end;
-    "false" ->
-        {ok, {LastSeq, _Prepend}} =
-                send_changes(Req, Resp, Db, StartSeq, <<"">>),
-        send_chunk(Resp, io_lib:format("\n],\n\"last_seq\":~w}\n", [LastSeq])),
-        end_json_response(Resp)
+    Filter = couch_httpd:qs_value(Req, "filter", nil),
+    {ok, FilterFun, EndFilterFun} = make_filter_funs(Req, Db, Filter),
+    try
+        {ok, Resp} = start_json_response(Req, 200),
+        send_chunk(Resp, "{\"results\":[\n"),
+        case couch_httpd:qs_value(Req, "continuous", "false") of
+        "true" ->
+            Self = self(),
+            {ok, Notify} = couch_db_update_notifier:start_link(
+                fun({_, DbName0}) when DbName0 == DbName ->
+                    Self ! db_updated;
+                (_) ->
+                    ok
+                end),
+            {Timeout, TimeoutFun} = get_changes_timeout(Req, Resp),
+            couch_stats_collector:track_process_count(Self,
+                                {httpd, clients_requesting_changes}),
+            try
+                keep_sending_changes(Req, Resp, Db, StartSeq, <<"">>, Timeout, TimeoutFun, FilterFun)
+            after
+                couch_db_update_notifier:stop(Notify),
+                get_rest_db_updated() % clean out any remaining update messages
+            end;
+
+        "false" ->
+            {ok, {LastSeq, _Prepend}} =
+                    send_changes(Req, Resp, Db, StartSeq, <<"">>, FilterFun),
+            send_chunk(Resp, io_lib:format("\n],\n\"last_seq\":~w}\n", [LastSeq])),
+            send_chunk(Resp, "")
+        end
+    after
+        EndFilterFun()
     end;
 
 handle_changes_req(#httpd{path_parts=[_,<<"_changes">>]}=Req, _Db) ->
