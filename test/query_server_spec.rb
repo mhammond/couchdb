@@ -222,20 +222,17 @@ functions = {
         fun(Head, {Req}) ->
             Send(<<"first chunk">>),
             Send(proplists:get_value(<<"q">>, Req)),
-            Fun = fun
-                (nil, _) ->
-                    ok;
-                ({Row}, F1) ->
-                    Send(proplists:get_value(<<"key">>, Row)),
-                    F1(GetRow(), F1)
+            Fun = fun({Row}, _) ->
+                Send(proplists:get_value(<<"key">>, Row)),
+                {ok, nil}
             end,
-            Fun(GetRow(), Fun),
+            {ok, _} = FoldRows(Fun, nil),
             <<"tail">>
         end.
     ERLANG
   },
   "show-while-get-rows-multi-send" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req) {
           send("bacon");
           var row;
@@ -247,9 +244,21 @@ functions = {
           return "tail";
         };
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, Req) ->
+            Send(<<"bacon">>),
+            Fun = fun({Row}, _) ->
+                Send(proplists:get_value(<<"key">>, Row)),
+                Send(<<"eggs">>),
+                {ok, nil}
+            end,
+            FoldRows(Fun, nil),
+            <<"tail">>
+        end.
+    ERLANG
   },
   "list-simple" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req) {
           send("first chunk");
           send(req.q);
@@ -260,9 +269,21 @@ functions = {
           return "early";
         };
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, {Req}) ->
+            Send(<<"first chunk">>),
+            Send(proplists:get_value(<<"q">>, Req)),
+            Fun = fun({Row}, _) ->
+                Send(proplists:get_value(<<"key">>, Row)),
+                {ok, nil}
+            end,
+            FoldRows(Fun, nil),
+            <<"early">>
+        end.
+    ERLANG
   },
   "list-chunky" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req) {
           send("first chunk");
           send(req.q);
@@ -276,16 +297,37 @@ functions = {
           };
         };
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, {Req}) ->
+            Send(<<"first chunk">>),
+            Send(proplists:get_value(<<"q">>, Req)),
+            Fun = fun
+                ({Row}, Count) when Count < 2 ->
+                    Send(proplists:get_value(<<"key">>, Row)),
+                    {ok, Count+1};
+                ({Row}, Count) when Count == 2 ->
+                    Send(proplists:get_value(<<"key">>, Row)),
+                    {stop, <<"early tail">>}
+            end,
+            {ok, Tail} = FoldRows(Fun, 0),
+            Tail
+        end.
+    ERLANG
   },
   "list-old-style" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req, foo, bar) {
           return "stuff";
         }
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, Req, Foo, Bar) ->
+            <<"stuff">>
+        end.
+    ERLANG
   },
   "list-capped" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req) {
           send("bacon")
           var row, i = 0;
@@ -298,9 +340,24 @@ functions = {
           };
         }
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, Req) ->
+            Send(<<"bacon">>),
+            Fun = fun
+                ({Row}, Count) when Count < 2 ->
+                    Send(proplists:get_value(<<"key">>, Row)),
+                    {ok, Count+1};
+                ({Row}, Count) when Count == 2 ->
+                    Send(proplists:get_value(<<"key">>, Row)),
+                    {stop, <<"early">>}
+            end,
+            {ok, Tail} = FoldRows(Fun, 0),
+            Tail
+        end.
+    ERLANG
   },
   "list-raw" => {
-    "js" => <<-JS
+    "js" => <<-JS,
         function(head, req) {
           send("first chunk");
           send(req.q);
@@ -311,15 +368,32 @@ functions = {
           return "tail";
         };
     JS
+    "erlang" => <<-ERLANG,
+        fun(Head, {Req}) ->
+            Send(<<"first chunk">>),
+            Send(proplists:get_value(<<"q">>, Req)),
+            Fun = fun({Row}, _) ->
+                Send(proplists:get_value(<<"key">>, Row)),
+                {ok, nil}
+            end,
+            FoldRows(Fun, nil),
+            <<"tail">>
+        end.
+    ERLANG
   },
   "filter-basic" => {
-    "js" => <<-JS
+    "js" => <<-JS,
       function(doc, req, userCtx) {
         if (doc.good) {
           return true;
         }
       }
     JS
+    "erlang" => <<-ERLANG,
+        fun({Doc}, Req, Ctx) ->
+            proplists:get_value(<<"good">>, Doc)
+        end.
+    ERLANG
   }
 }
 
@@ -509,7 +583,7 @@ describe "query server normal case" do
       @qs.add_fun(@fun).should == true
     end
     it "should only return true for good docs" do
-      @qs.run(["filter", [{"key"=>"bam", "good" => true}, {"foo" => "bar"}, {"good" => true}]]).
+      @qs.run(["filter", [{"key"=>"bam", "good" => true}, {"foo" => "bar"}, {"good" => true}], {}, {}]).
         should ==  [true, [true, false, true]]
     end
   end
@@ -543,7 +617,7 @@ describe "query server that exits" do
     it "should get a warning" do
       resp = @qs.run(["list", {"foo"=>"bar"}, {"q" => "ok"}])
       resp["error"].should == "render_error"
-      resp["reason"].should include("the list API has changed")
+      #resp["reason"].should include("the list API has changed")
     end
   end
 

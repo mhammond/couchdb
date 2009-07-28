@@ -56,13 +56,22 @@ stop(_Pid) ->
 set_timeout(_Pid, _TimeOut) ->
     ok.
 
-prompt(Pid, Data) when is_pid(Pid) ->
+prompt(Pid, Data) when is_pid(Pid), is_list(Data) ->
     case get(?STATE) of
     undefined ->
         State = #evstate{},
         put(?STATE, State);
     State ->
         State
+    end,
+    case is_pid(State#evstate.list_pid) of
+        true ->
+            case lists:member(hd(Data), [<<"list_row">>, <<"list_end">>]) of
+                true -> ok;
+                _ -> throw({error, query_server_error})
+            end;
+        _ ->
+            ok % Not listing
     end,
     {NewState, Resp} = run(State, Data),
     put(?STATE, NewState),
@@ -100,6 +109,15 @@ run(State, [<<"rereduce">>, Funs, Vals]) ->
 run(State, [<<"validate">>, BFun, NDoc, ODoc, Ctx]) ->
     {_Sig, Fun} = makefun(BFun),
     {State, catch Fun(NDoc, ODoc, Ctx)};
+run(State, [<<"filter">>, Docs, Req, Ctx]) ->
+    {_Sig, Fun} = hd(State#evstate.funs),
+    Resp = lists:map(fun(Doc) ->
+        case (catch Fun(Doc, Req, Ctx)) of
+            true -> true;
+            _ -> false
+        end
+    end, Docs),
+    {State, [true, Resp]};
 run(State, [<<"show">>, BFun, Doc, Req]) ->
     {_Sig, Fun} = makefun(BFun),
     Resp = case (catch Fun(Doc, Req)) of
@@ -112,15 +130,15 @@ run(State, [<<"show">>, BFun, Doc, Req]) ->
     end,
     {State, Resp};
 run(State, [<<"list">>, Head, Req]) ->
-    write("Getting fun~n"),
     {Sig, Fun} = hd(State#evstate.funs),
-    write("Spawning function.~n"),
+    % This is kinda dirty
+    case is_function(Fun, 2) of
+        false -> throw({error, render_error});
+        true -> ok
+    end,
     Self = self(),
     SpawnFun = fun() ->
-        write("Spawned!~n"),
         LastChunk = (catch Fun(Head, Req)),
-        io:format(standard_error, "LAST: ~p~n", [LastChunk]),
-        write("Finished!~n"),
         case erlang:get(list_started) of
             undefined ->
                 Headers =
@@ -151,18 +169,13 @@ run(State, [<<"list">>, Head, Req]) ->
         end,
         Self ! {self(), list_end, lists:reverse(LastChunks)}
     end,
-    write("Created, putting~n"),
     erlang:put(do_trap, process_flag(trap_exit, true)),
-    write("And spawn link~n"),
     Pid = spawn_link(SpawnFun),
-    write("Waiting for response.~n"),
     Resp =
     receive
         {Pid, start, Chunks, JsonResp} ->
-            write("Got response~n"),
             [<<"start">>, Chunks, JsonResp]
     after 5000 ->
-        write("Timed out~n"),
         throw({timeout, list_start})
     end,
     {State#evstate{list_pid=Pid}, Resp};
@@ -200,7 +213,7 @@ run(#evstate{list_pid=Pid}=State, [<<"list_end">>]) when is_pid(Pid) ->
     {State#evstate{list_pid=nil}, Resp};
 run(_, Unknown) ->
     ?LOG_ERROR("Native Process: Unknown command: ~p~n", [Unknown]),
-    throw({error, unknown_command}).
+    throw({error, query_server_error}).
 
 bindings(Sig) ->
     Self = self(),
@@ -216,26 +229,21 @@ bindings(Sig) ->
     end,
 
     Start = fun(Headers) ->
-        write("START CALLED~n"),
         erlang:put(list_headers, Headers)
     end,
 
     Send = fun(Chunk) ->
-        write("SEND CALLED~n"),
         Curr =
         case erlang:get(Sig) of
             undefined -> [];
             Else -> Else
         end,
-        erlang:put(Sig, [Chunk | Curr]),
-        write("DONE SENDING~n")
+        erlang:put(Sig, [Chunk | Curr])
     end,
 
     GetRow = fun() ->
-        write("GET ROW CALLED~n"),
         case erlang:get(list_started) of
             undefined ->
-                write("INIT LIST~n"),
                 Headers =
                 case erlang:get(list_headers) of
                     undefined -> {[{<<"headers">>, {[]}}]};
@@ -249,7 +257,6 @@ bindings(Sig) ->
                 Self ! {self(), start, lists:reverse(Chunks), Headers},
                 erlang:put(list_started, true);
             _ ->
-                write("LIST STARTED SENDING~n"),
                 Chunks =
                 case erlang:get(Sig) of
                     undefined -> [];
@@ -267,13 +274,16 @@ bindings(Sig) ->
             throw({timeout, list_pid_getrow})
         end
     end,
-    
+   
+    FoldRows = fun(Fun, Acc) -> foldrows(GetRow, Fun, Acc) end,
+
     [
         {'Log', Log},
         {'Emit', Emit},
         {'Start', Start},
         {'Send', Send},
-        {'GetRow', GetRow}
+        {'GetRow', GetRow},
+        {'FoldRows', FoldRows}
     ].
 
 % thanks to erlview, via:
@@ -312,7 +322,20 @@ reduce(BinFuns, Keys, Vals, ReReduce) ->
     end, Funs),
     [true, Reds].
 
-write(Msg) ->
-    write(Msg, []).
-write(Msg, Args) ->
-    io:format(standard_error, Msg, Args).
+foldrows(GetRow, ProcRow, Acc) ->
+    case GetRow() of
+        nil ->
+            {ok, Acc};
+        Row ->
+            case (catch ProcRow(Row, Acc)) of
+                {ok, Acc2} ->
+                    foldrows(GetRow, ProcRow, Acc2);
+                {stop, Acc2} ->
+                    {ok, Acc2}
+            end
+    end.
+
+%write(Msg) ->
+%    write(Msg, []).
+%write(Msg, Args) ->
+%    io:format(standard_error, Msg, Args).

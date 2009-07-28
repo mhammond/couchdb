@@ -26,9 +26,13 @@ loop(Pid) ->
     case read() of
         stop -> ok;
         Json ->
-            Resp = couch_native_process:prompt(Pid, Json),
-            ok = write(Resp),
-            loop(Pid)
+            case (catch couch_native_process:prompt(Pid, Json)) of
+                {error, Reason} ->
+                    ok = write({[{error, Reason}]});
+                Resp ->
+                    ok = write(Resp),
+                    loop(Pid)
+            end
     end.
 
 main([]) ->
