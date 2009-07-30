@@ -92,10 +92,9 @@ run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
     {State#evstate{funs=Funs ++ [FunInfo]}, true};
 run(State, [<<"map_doc">> , Doc]) ->
     Resp = lists:map(fun({Sig, Fun}) ->
+        erlang:put(Sig, []),
         Fun(Doc),
-        Data = lists:reverse(erlang:get(Sig)),
-        erlang:put(Sig, nil),
-        Data
+        lists:reverse(erlang:get(Sig))
     end, State#evstate.funs),
     {State, Resp};
 run(State, [<<"reduce">>, Funs, KVs]) ->
@@ -224,7 +223,6 @@ bindings(Sig) ->
         ?LOG_INFO(Msg, [])
     end,
 
-    erlang:put(Sig, []),
     Emit = fun(Id, Value) ->
         Curr = erlang:get(Sig),
         erlang:put(Sig, [[Id, Value] | Curr])
