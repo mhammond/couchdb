@@ -93,7 +93,9 @@ run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
 run(State, [<<"map_doc">> , Doc]) ->
     Resp = lists:map(fun({Sig, Fun}) ->
         Fun(Doc),
-        lists:reverse(erlang:get(Sig))
+        Data = lists:reverse(erlang:get(Sig)),
+        erlang:put(Sig, nil),
+        Data
     end, State#evstate.funs),
     {State, Resp};
 run(State, [<<"reduce">>, Funs, KVs]) ->
