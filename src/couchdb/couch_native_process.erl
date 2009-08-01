@@ -32,18 +32,18 @@
 % which should be roughly the same as the javascript:
 %    emit(doc._id, null);
 %
-% As can be seen, it is *not* geared towards being the friendliest or easiest
-% to use for authors of native view servers.  For such uses, this should be
-% used as a building-block upon which friendlier, or 'higher-level' view
-% servers can be built upon, and the sources of such 'helper' functions
-% as used above, if
+% This module exposes enough functions such that a native erlang server can 
+% act as a fully-fleged view server, but no 'helper' functions specifically for
+% simplifying your erlang view code.  It is expected other third-party extensions
+% will evolve which offer useful layers on top of this view server to help
+% simplify your view code.
 -module(couch_native_process).
 
 -export([start_link/0]).
 -export([set_timeout/2, prompt/2, stop/1]).
 
 -define(STATE, native_proc_state).
--record(evstate, {funs=[], query_config=[], list_pid=nil}).
+-record(evstate, {funs=[], query_config=[], list_pid=nil, timeout=5000}).
 
 -include("couch_db.hrl").
 
@@ -53,7 +53,14 @@ start_link() ->
 stop(_Pid) ->
     ok.
 
-set_timeout(_Pid, _TimeOut) ->
+set_timeout(_Pid, TimeOut) ->
+    NewState = case get(?STATE) of
+    undefined ->
+        #evstate{timeout=TimeOut};
+    State ->
+        State#evstate{timeout=TimeOut}
+    end,
+    put(?STATE, NewState),
     ok.
 
 prompt(Pid, Data) when is_pid(Pid), is_list(Data) ->
@@ -88,7 +95,7 @@ run(_, [<<"reset">>]) ->
 run(_, [<<"reset">>, QueryConfig]) ->
     {#evstate{query_config=QueryConfig}, true};
 run(#evstate{funs=Funs}=State, [<<"add_fun">> , BinFunc]) ->
-    FunInfo = makefun(BinFunc),
+    FunInfo = makefun(State, BinFunc),
     {State#evstate{funs=Funs ++ [FunInfo]}, true};
 run(State, [<<"map_doc">> , Doc]) ->
     Resp = lists:map(fun({Sig, Fun}) ->
@@ -104,11 +111,11 @@ run(State, [<<"reduce">>, Funs, KVs]) ->
     end, {[], []}, KVs),
     Keys2 = lists:reverse(Keys),
     Vals2 = lists:reverse(Vals),
-    {State, catch reduce(Funs, Keys2, Vals2, false)};
+    {State, catch reduce(State, Funs, Keys2, Vals2, false)};
 run(State, [<<"rereduce">>, Funs, Vals]) ->
-    {State, catch reduce(Funs, null, Vals, true)};
+    {State, catch reduce(State, Funs, null, Vals, true)};
 run(State, [<<"validate">>, BFun, NDoc, ODoc, Ctx]) ->
-    {_Sig, Fun} = makefun(BFun),
+    {_Sig, Fun} = makefun(State, BFun),
     {State, catch Fun(NDoc, ODoc, Ctx)};
 run(State, [<<"filter">>, Docs, Req, Ctx]) ->
     {_Sig, Fun} = hd(State#evstate.funs),
@@ -120,7 +127,7 @@ run(State, [<<"filter">>, Docs, Req, Ctx]) ->
     end, Docs),
     {State, [true, Resp]};
 run(State, [<<"show">>, BFun, Doc, Req]) ->
-    {_Sig, Fun} = makefun(BFun),
+    {_Sig, Fun} = makefun(State, BFun),
     Resp = case (catch Fun(Doc, Req)) of
         FunResp when is_list(FunResp) ->
             FunResp;
@@ -157,7 +164,7 @@ run(State, [<<"list">>, Head, Req]) ->
                 receive
                     {Self, list_row, _Row} -> ignore;
                     {Self, list_end} -> ignore
-                after 5000 ->
+                after State#evstate.timeout ->
                     throw({timeout, list_cleanup_pid})
                 end;
             _ ->
@@ -176,7 +183,7 @@ run(State, [<<"list">>, Head, Req]) ->
     receive
         {Pid, start, Chunks, JsonResp} ->
             [<<"start">>, Chunks, JsonResp]
-    after 5000 ->
+    after State#evstate.timeout ->
         throw({timeout, list_start})
     end,
     {State#evstate{list_pid=Pid}, Resp};
@@ -188,12 +195,12 @@ run(#evstate{list_pid=Pid}=State, [<<"list_row">>, Row]) when is_pid(Pid) ->
         {Pid, list_end, Data} ->
             receive
                 {'EXIT', Pid, normal} -> ok
-            after 5000 ->
+            after State#evstate.timeout ->
                 throw({timeout, list_cleanup})
             end,
             process_flag(trap_exit, erlang:get(do_trap)),
             {State#evstate{list_pid=nil}, [<<"end">>, Data]}
-    after 5000 ->
+    after State#evstate.timeout ->
         throw({timeout, list_row})
     end;
 run(#evstate{list_pid=Pid}=State, [<<"list_end">>]) when is_pid(Pid) ->
@@ -203,11 +210,11 @@ run(#evstate{list_pid=Pid}=State, [<<"list_end">>]) when is_pid(Pid) ->
         {Pid, list_end, Data} ->
             receive
                 {'EXIT', Pid, normal} -> ok
-            after 5000 ->
+            after State#evstate.timeout ->
                 throw({timeout, list_cleanup})
             end,
-            [<<"end">>, Data]            
-    after 5000 ->
+            [<<"end">>, Data]
+    after State#evstate.timeout ->
         throw({timeout, list_end})
     end,
     process_flag(trap_exit, erlang:get(do_trap)),
@@ -216,7 +223,7 @@ run(_, Unknown) ->
     ?LOG_ERROR("Native Process: Unknown command: ~p~n", [Unknown]),
     throw({error, query_server_error}).
 
-bindings(Sig) ->
+bindings(State, Sig) ->
     Self = self(),
 
     Log = fun(Msg) ->
@@ -270,7 +277,7 @@ bindings(Sig) ->
                 Row;
             {Self, list_end} ->
                 nil
-        after 5000 ->
+        after State#evstate.timeout ->
             throw({timeout, list_pid_getrow})
         end
     end,
@@ -288,12 +295,12 @@ bindings(Sig) ->
 
 % thanks to erlview, via:
 % http://erlang.org/pipermail/erlang-questions/2003-November/010544.html
-makefun(Source) ->
+makefun(State, Source) ->
     Sig = erlang:md5(Source),
-    BindFuns = bindings(Sig),
-    {Sig, makefun(Source, BindFuns)}.
+    BindFuns = bindings(State, Sig),
+    {Sig, makefun(State, Source, BindFuns)}.
 
-makefun(Source, BindFuns) ->
+makefun(_State, Source, BindFuns) ->
     FunStr = binary_to_list(Source),
     {ok, Tokens, _} = erl_scan:string(FunStr),
     Form = case (catch erl_parse:parse_exprs(Tokens)) of
@@ -310,12 +317,12 @@ makefun(Source, BindFuns) ->
     {value, Fun, _} = erl_eval:expr(Form, Bindings),
     Fun.
 
-reduce(BinFuns, Keys, Vals, ReReduce) ->
+reduce(State, BinFuns, Keys, Vals, ReReduce) ->
     Funs = case is_list(BinFuns) of
         true ->
-            lists:map(fun makefun/1, BinFuns);
+            lists:map(fun(BF) -> makefun(State, BF) end, BinFuns);
         _ ->
-            [makefun(BinFuns)]
+            [makefun(State, BinFuns)]
     end,
     Reds = lists:map(fun({_Sig, Fun}) ->
         Fun(Keys, Vals, ReReduce)
