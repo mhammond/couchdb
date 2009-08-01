@@ -33,10 +33,10 @@
 %    emit(doc._id, null);
 %
 % This module exposes enough functions such that a native erlang server can 
-% act as a fully-fleged view server, but no 'helper' functions specifically for
-% simplifying your erlang view code.  It is expected other third-party extensions
-% will evolve which offer useful layers on top of this view server to help
-% simplify your view code.
+% act as a fully-fleged view server, but no 'helper' functions specifically
+% for simplifying your erlang view code.  It is expected other third-party
+% extensions will evolve which offer useful layers on top of this view server
+% to help simplify your view code.
 -module(couch_native_process).
 
 -export([start_link/0]).
