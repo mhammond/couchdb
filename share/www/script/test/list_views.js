@@ -382,5 +382,4 @@ couchTests.list_views = function(debug) {
   T(!(/Key: -4/.test(xhr.responseText)));
   T(/FirstKey: -3/.test(xhr.responseText));
   T(/LastKey: 0/.test(xhr.responseText));
-  
 };
