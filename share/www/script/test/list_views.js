@@ -376,11 +376,11 @@ couchTests.list_views = function(debug) {
 
   // Test we can run lists and views from separate docs.
   T(db.save(viewOnlyDesignDoc).ok);
-  xhr = CouchDB.request("GET", "/test_suite_db/_design/lists/_list/simpleForm/views/basicView?startkey=3");
+  xhr = CouchDB.request("GET", "/test_suite_db/_design/lists/_list/simpleForm/views/basicView?startkey=-3");
   T(xhr.status == 200, "with query params");
   T(/Total Rows/.test(xhr.responseText));
-  T(!(/Key: 1/.test(xhr.responseText)));
-  T(/FirstKey: -9/.test(xhr.responseText));
-  T(/LastKey: -3/.test(xhr.responseText));
+  T(!(/Key: -4/.test(xhr.responseText)));
+  T(/FirstKey: -3/.test(xhr.responseText));
+  T(/LastKey: 0/.test(xhr.responseText));
   
 };
