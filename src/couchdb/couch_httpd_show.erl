@@ -57,10 +57,12 @@ handle_doc_show(Req, DesignName, ShowName, DocId, Db) ->
     end,
     send_doc_show_response(Lang, ShowSrc, DocId, Doc, Req, Db).
 
+% view-list request with view and list from same design docs.
 handle_view_list_req(#httpd{method='GET',
         path_parts=[_DbName, _Design, DesignName, _List, ListName, ViewName]}=Req, Db) ->
     handle_view_list(Req, DesignName, ListName, DesignName, ViewName, Db, nil);
 
+% view-list request with view and list from different design docs.
 handle_view_list_req(#httpd{method='GET',
         path_parts=[_DbName, _Design, DesignName, _List, ListName, ViewDesignName, ViewName]}=Req, Db) ->
     handle_view_list(Req, DesignName, ListName, ViewDesignName, ViewName, Db, nil);
